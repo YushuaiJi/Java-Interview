@@ -34,6 +34,86 @@ JVM虚拟机内存模型实现规范：
 
 逃逸分析技术可以分析出某个对象是否永远只在某个方法、线程的范围内，并没有“逃逸”出这个范围，逃逸分析的一个结果就是对于某些未逃逸对象可以直接在栈上分配提高对象分配回收效率，对象占用的空间会随栈帧的出栈而销毁。
 
+
+```
+public static StringBuffer craeteStringBuffer(String s1, String s2) {
+    StringBuffer sb = new StringBuffer();
+    sb.append(s1);
+    sb.append(s2);
+    return sb;
+}
+
+public static String createStringBuffer(String s1, String s2) {
+    StringBuffer sb = new StringBuffer();
+    sb.append(s1);
+    sb.append(s2);
+    return sb.toString();
+}
+```
+
+## 同步省略
+
+- 在动态编译同步块的时候，JIT编译器可以借助逃逸分析来判断同步块所使用的锁对象是否只能够被一个线程访问而没有被发布到其他线程。
+
+-如果同步块所使用的锁对象通过这种分析被证实只能够被一个线程访问，那么JIT编译器在编译这个同步块的时候就会取消对这部分代码的同步。这个取消同步的过程就叫同步省略，也叫锁消除。
+
+```
+public void f() {
+    Object hollis = new Object();
+    synchronized(hollis) {
+        System.out.println(hollis);
+    }
+}
+```
+
+```
+public void f() {
+    Object hollis = new Object();
+    System.out.println(hollis);
+}
+```
+
+## 标量替换
+
+在JIT阶段，如果经过逃逸分析，发现一个对象不会被外界访问的话，那么经过JIT优化，就会把这个对象拆解成若干个其中包含的若干个成员变量来代替。这个过程就是标量替换。
+
+```
+public static void main(String[] args) {
+   alloc();
+}
+
+private static void alloc() {
+   Point point = new Point（1,2）;
+   System.out.println("point.x="+point.x+"; point.y="+point.y);
+}
+class Point{
+    private int x;
+    private int y;
+}
+```
+以上代码中，point对象并没有逃逸出alloc方法，并且point对象是可以拆解成标量的。那么，JIT就会不会直接创建Point对象，而是直接使用两个标量int x ，int y来替代Point对象。
+
+以上代码，经过标量替换后，就会变成：
+
+```
+private static void alloc() {
+   int x = 1;
+   int y = 2;
+   System.out.println("point.x="+x+"; point.y="+y);
+}
+```
+
+可以看到，Point这个聚合量经过逃逸分析后，发现他并没有逃逸，就被替换成两个聚合量了。那么标量替换有什么好处呢？就是可以大大减少堆内存的占用。因为一旦不需要创建对象了，那么就不再需要分配堆内存了。
+
+标量替换为栈上分配提供了很好的基础。
+
+## 栈上分配
+在Java虚拟机中，对象是在Java堆中分配内存的，这是一个普遍的常识。但是，有一种特殊情况，那就是如果经过逃逸分析后发现，一个对象并没有逃逸出方法的话，那么就可能被优化成栈上分配。这样就无需在堆上分配内存，也无须进行垃圾回收了。
+
+
+
+
+
 ### 类加载机制
 #### 加载过程
 
@@ -51,19 +131,44 @@ JVM虚拟机内存模型实现规范：
 #### 双亲委派
 定义：如果父类加载器可以完成类加载任务，就成功返回，倘若父类加载器无法完成此加载任务，子加载器才会尝试自己去加载，这就是**双亲委派模式**。
 
-优点：采用双亲委派模式的是好处是Java类随着它的类加载器一起具备了一种带有优先级的层次关系，通过这种层级关可以避免类的重复加载，当父亲已经加载了该类时，就没有必要子ClassLoader再加载一次。其次防止恶意覆盖Java核心API。
+解释：JDK自带3个类加载器，启动类加载器（父加载rt.jar），扩展类加载器（母加载ext/*.jar），应用类加载器（子类加载classpath）
+比如自己写一个Java.lang.String（这样植入了后门程序），所以要先加载父，不行再加载母，不行再加载子类，不然会不安全。
 
-三次大型破坏双亲委派模式的事件：
+###  三个性质
 
-1. 在双亲委派模式出来之前，用户继承ClassLoader就是为了重写loadClass方法，但双亲委派模式需要这个方法，所以1.2之后添加了findClass供以后的用户重写
-2. 如果基础类要调回用户的代码，如JNDI/JDBC需要调用ClassPath下的自己的代码来进行资源管理，Java团队添加了一个线程上下文加载器，如果该加载器没有被设置过，那么就默认是应用程序类加载器
-3. 为了实现代码热替换，OSGi是为了实现自己的类加载逻辑，用平级查找的逻辑替换掉了向下传递的逻辑。但其实可以不破坏双亲委派逻辑而是自定义类加载器来达到代码热替换。比如[这篇文章](https://www.cnblogs.com/pfxiong/p/4070462.html)
+- 原子性是指在一个操作中就是cpu不可以在中途暂停然后再调度，既不被中断操作，要不执行完成，要不就不执行。
+
+- 可见性是指当多个线程访问同一个变量时，一个线程修改了这个变量的值，其他线程能够立即看得到修改的值。
+
+- 有序性即程序执行的顺序按照代码的先后顺序执行。
+
 
 ### 内存分配（堆上的内存分配）
 ![](https://github.com/xbox1994/Java-Interview/raw/master/images/堆的内存分配.png)
-#### 新生代
-##### 进入条件
-优先选择在新生代的Eden区被分配。
+
+#### 1新生代
+主要是用来存放新生的对象。一般占据堆空间的1/3，由于频繁创建对象，所以新生代会频繁触发MinorGC进行垃圾回收。
+新生代分为Eden区、ServivorFrom、ServivorTo三个区。
+
+- Eden区：Java新对象的出生地(如果新创建的对象占用内存很大则直接分配给老年代)。当Eden区内存不够的时候就会触发一次MinorGc，对新生代区进行一次垃圾回收。
+- ServivorTo：保留了一次MinorGc过程中的幸存者。
+- ServivorFrom: 上一次GC的幸存者，作为这一次GC的被扫描者。
+
+- 如果只有1个Survivor区，那当Eden区满了之后，就会复制对象到Survivor区，容易产生内存碎片化。严重影响性能。
+- 所以使用2个Survivor区，始终保持有一个空的Survivor区，可以避免内存碎片化。
+
+当JVM无法为新建对象分配内存空间的时候(Eden区满的时候)，JVM触发MinorGc。因此新生代空间占用越低，MinorGc越频繁。
+MinorGC采用复制算法。
+
+### 2 老年代
+老年代的对象比较稳定，所以MajorGC不会频繁执行。
+
+触发MinorGC的条件：
+
+1 在进行MajorGC之前，一般都先进行了一次MinorGC，使得有新生代的对象进入老年代，当老年代空间不足时就会触发MajorGC。
+2 当无法找到足够大的连续空间分配给新创建的较大对象时，也会触发MajorGC进行垃圾回收腾出空间。
+
+
 #### 老年代
 ##### 进入条件
 1. 大对象，-XX:PretenureSizeThreshold 大于这个参数的对象直接在老年代分配，来避免新生代GC以及分配担保机制和Eden与Survivor之间的复制
